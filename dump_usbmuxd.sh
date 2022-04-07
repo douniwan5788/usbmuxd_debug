@@ -30,6 +30,6 @@ sudo socat -t100 "UNIX-LISTEN:${socket},mode=777,reuseaddr,fork" "TCP:localhost:
 
 echo "Started"
 # # Record traffic
-tshark -i lo0 -w "${dump}" -F pcapng "dst port ${port} or src port ${port}"
+# tshark -i lo0 -w "${dump}" -F pcapng "dst port ${port} or src port ${port}"
 # or wait forever and use wireshark
-# while :; do sleep 2073600; done
+while :; do sleep 2073600; done
