@@ -26,20 +26,14 @@ end
 -- call it now
 resetDebugLevel()
 
-plist_protocol = Proto("plist", "Apple Plist")
-
-function plist_protocol.dissector(tvb, pinfo, tree)
-    local xml_dissector = Dissector.get("xml")
-    local bplist_dissector = Dissector.get("bplist")
-    local plist_dissector = xml_dissector
-    -- Check for magic number, otherwise quit
-    local magic_number = tvb(0, 6):string()
-    if magic_number == "bplist" then plist_dissector = bplist_dissector end
-    -- pinfo.cols.protocol = "plist"
-    plist_dissector(tvb, pinfo, tree)
-end
+local tls_dissector = Dissector.get("tls")
+local plist_dissector = Dissector.get("plist")
+local lockdown_dissector = Dissector.get("lockdown")
+local dtxmessage_dissector = Dissector.get("dtxmessage")
 
 usbmux_protocol = Proto("usbmux", "Apple USBMUX Protocol")
+
+DissectorTable.new("usbmux.subproto")
 
 local usbmuxd_msgtypes = {
     "result", "connect", "listen", "device_add", "device_remove",
@@ -64,20 +58,17 @@ local header_fields = {
     message_type = ProtoField.int32("usbmux.message_type", "message_type",
                                     base.DEC, usbmuxd_msgtypes),
     tag = ProtoField.int32("usbmux.tag", "tag", base.DEC),
-    payload = ProtoField.string("usbmux.payload", "payload"),
-    lockdownd = ProtoField.bool("usbmux.lockdownd", "is lockdownd frame"),
-    tls = ProtoField.bool("usbmux.tls", "is TLS")
+    payload = ProtoField.string("usbmux.payload", "payload")
+    -- lockdownd = ProtoField.bool("usbmux.lockdownd", "is lockdownd frame"),
+    -- tls = ProtoField.bool("usbmux.tls", "is TLS")
 }
-
-message_plist = Proto("usbmux.message", "Plist protocol");
 
 -- register the ProtoFields
 usbmux_protocol.fields = header_fields
 
-local tls_started = {}
-local tls_dissector = Dissector.get("tls")
+local sub_dissectors = {}
 local tcp_steam = Field.new("tcp.stream")
-local usbmux_tls = Field.new("usbmux.tls")
+-- local usbmux_tls = Field.new("usbmux.tls")
 
 function usbmux_protocol.init() end
 
@@ -109,28 +100,28 @@ checkUsbmuxLength = function(tvbuf, offset)
     -- to at least figure out the full length of this Usbmux messsage
 
     local msgLen
-    local is_tls = false
-    local is_lockdownd = false;
-
-    -- fixme: should only enter once?
+    local sub_dissector
+    -- todo: should only enter once?
     -- local inside_tls = usbmux_tls()
     -- dprint2("inside_tls", inside_tls)
     -- local tcp_stream_id = tcp_steam().value
     -- local start_pktnum = tls_started[tcp_stream_id]
     -- dprint2("tcp_stream_id", tcp_stream_id, "start_pktnum", start_pktnum,
     --       "pinfo.number", pinfo.number)
+
+    print(tvbuf(offset, 4):le_uint())
     if -- start_pktnum and pinfo.number >= start_pktnum or
-    tls_content_type["change_cipher_spec"] <= tvbuf(offset, offset + 1):uint() and
-        tvbuf(offset, offset + 1):uint() <= tls_content_type['AC'] and
-        (tvbuf(offset + 1, offset + 2):uint() == 0x0301 or
-            tvbuf(offset + 1, offset + 2):uint() == 0x0303) then
+    tls_content_type["change_cipher_spec"] <= tvbuf(offset, 1):uint() and
+        tvbuf(offset, 1):uint() <= tls_content_type['AC'] and
+        (tvbuf(offset + 1, 2):uint() == 0x0301 or tvbuf(offset + 1, 2):uint() ==
+            0x0303) then
 
         -- subtree:add(header_fields.tls, true)
 
         -- if pinfo.number < (start_pktnum or 99999) then
         --     tls_started[tcp_stream_id] = pinfo.number
         -- end
-        msgLen = 1 + 2 + 2 + tvbuf(offset + 3, offset + 2):uint()
+        msgLen = 1 + 2 + 2 + tvbuf(offset + 3, 2):uint()
         -- dprint2("tls:", tcp_stream_id, tls_started[tcp_stream_id])
 
         -- if 1 + 2 + 2 + record_len > tvbuf:len() then
@@ -141,15 +132,19 @@ checkUsbmuxLength = function(tvbuf, offset)
         --     return
         -- end
 
-        is_tls = true
+        sub_dissector = tls_dissector
+    elseif tvbuf(offset, 4):le_uint() == 0x1F3D5B79 then
+        msgLen = 0x20
+        sub_dissector = dtxmessage_dissector
     else
         msgLen = tvbuf(offset, 4):le_uint()
         dprint2("plain: msgLen", msgLen)
 
+        -- todo: more test wether is lockdown
         if msgLen > 0xFFFFF then
-            is_lockdownd = true
-            -- in lockdownd frame, msgLen is big-endian and does not include msgLen itself(4 bytes)
-            msgLen = tvbuf(offset, 4):uint() + 4
+            -- is_lockdownd = true
+            sub_dissector = lockdown_dissector
+            msgLen = 4
         end
     end
 
@@ -159,25 +154,26 @@ checkUsbmuxLength = function(tvbuf, offset)
         return -(msgLen - remainlen)
     end
 
-    return msgLen, is_tls, is_lockdownd
+    return msgLen, sub_dissector
 end
 
 function usbmux_protocol.dissector(tvbuf, pktinfo, root_tree)
     local pktlen = tvbuf:len()
     local bytes_consumed = 0
-    dprint("pktlen")
+    dprint("pktlen:", pktlen)
+
+    -- handle split and reassemble
     while bytes_consumed < pktlen do
-        local result, is_tls, is_lockdownd =
-            checkUsbmuxLength(tvbuf, bytes_consumed)
+        local result, sub_dissector = checkUsbmuxLength(tvbuf, bytes_consumed)
         dprint("result1", result, "bytes_consumed", bytes_consumed)
 
         if result > 0 then
-            if is_tls then
-                dprint2("tls")
-                result = tls_dissector(tvbuf, pktinfo, root_tree)
+            if sub_dissector then
+                dprint2("sub_dissector", tostring(sub_dissector))
+                result = sub_dissector(tvbuf, pktinfo, root_tree)
             else
                 result = dissect_one_message(tvbuf, pktinfo, root_tree,
-                                             bytes_consumed, is_lockdownd)
+                                             bytes_consumed)
             end
         end
         dprint("result2", result)
@@ -215,36 +211,27 @@ function usbmux_protocol.dissector(tvbuf, pktinfo, root_tree)
     return bytes_consumed
 end
 
-function dissect_one_message(tvbuf, pktinfo, root_tree, offset, is_lockdownd)
+function dissect_one_message(tvbuf, pktinfo, root_tree, offset)
     -- tcp stream or inside decrypted tls stream
-    -- fixme: only once?
+    -- todo: only once?
     pktinfo.cols.protocol:append('/' .. usbmux_protocol.name)
     local subtree = root_tree:add(usbmux_protocol, tvbuf(),
                                   "USBMUX Protocol Data")
 
     local payload_length = 0
-    if is_lockdownd then
-        subtree:add(header_fields.lockdownd, true)
-        -- in lockdownd frame, msgLen is big-endian and does not include msgLen itself(4 bytes)
-        payload_length = tvbuf(offset, 4):uint()
-        msg_length = payload_length + 4
-        subtree:add(header_fields.message_length, tvbuf(offset, 4))
-        offset = offset + 4
-    else
-        msg_length = tvbuf(offset, 4):le_uint()
-        subtree:add_le(header_fields.message_length, tvbuf(offset, 4))
-        offset = offset + 4
-        subtree:add_le(header_fields.version, tvbuf(offset, 4))
-        offset = offset + 4
-        local msg_type = tvbuf(offset, 4):le_uint()
-        subtree:add_le(header_fields.message_type, tvbuf(offset, 4))
+    msg_length = tvbuf(offset, 4):le_uint()
+    subtree:add_le(header_fields.message_length, tvbuf(offset, 4))
+    offset = offset + 4
+    subtree:add_le(header_fields.version, tvbuf(offset, 4))
+    offset = offset + 4
+    local msg_type = tvbuf(offset, 4):le_uint()
+    subtree:add_le(header_fields.message_type, tvbuf(offset, 4))
 
-        offset = offset + 4
-        subtree:add_le(header_fields.tag, tvbuf(offset, 4))
-        offset = offset + 4
+    offset = offset + 4
+    subtree:add_le(header_fields.tag, tvbuf(offset, 4))
+    offset = offset + 4
 
-        payload_length = msg_length - offset
-    end
+    payload_length = msg_length - offset
 
     dprint2("payload_length", payload_length)
 
@@ -258,7 +245,6 @@ function dissect_one_message(tvbuf, pktinfo, root_tree, offset, is_lockdownd)
     -- local xml_dissector = Dissector.get("xml")
     -- xml_dissector(tvbuf(offset, msg_length-offset):tvb(), pktinfo, subtree)
 
-    local plist_dissector = Dissector.get("plist")
     -- local extendtree = subtree:add(plist_dissector,
     --                                tvbuf(offset, msg_length - offset):tvb(),
     --                                "message")
@@ -306,6 +292,28 @@ end
 local tcp_port = DissectorTable.get("tcp.port")
 tcp_port:add(default_settings.port, usbmux_protocol)
 -- tcp_port:add(default_settings.port, tls_dissector)
+
+-- local function heuristic_checker(buffer, pinfo, tree)
+--     -- guard for length
+--     length = buffer:len()
+--     if length < math.min(USBMUX_MSG_HDR_LEN, TLS_MSG_HDR_LEN) then return false end
+
+--     local potential_proto_flag = buffer(0, 1):uint()
+--     if potential_proto_flag ~= 0xd3 then return false end
+
+--     local potential_msg_id = buffer(1, 2):uint()
+
+--     if get_message_name(potential_msg_id) ~= "Unknown" then
+--         scp_protocol.dissector(buffer, pinfo, tree)
+--         return true
+--     else
+--         return false
+--     end
+-- end
+
+-- -- register as heuristic dissector for both TCP and TLS 
+-- usbmux_protocol:register_heuristic("tcp", heuristic_checker)
+-- usbmux_protocol:register_heuristic("tls", heuristic_checker)
 
 local tls_tcp_port = DissectorTable.get("tls.port")
 tls_tcp_port:add(default_settings.port, usbmux_protocol)
