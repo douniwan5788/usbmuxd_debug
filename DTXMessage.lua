@@ -1,7 +1,5 @@
-local plist_dissector = Dissector.get("plist")
-
 dtxmessage_protocol = Proto("dtxmessage",
-                            "Apple USBMUX dtxmessage service Protocol")
+                            "Apple USBMUX DTXMessage service Protocol")
 
 local DTXMESSAGE_MSG_HDR_LEN = 0x20
 local DTXMESSAGE_PAYLOAD_HDR_LEN = 0x10
@@ -30,7 +28,18 @@ local header_fields = {
     total_length = ProtoField.uint64("dtxmessage.total_length", "total_length",
                                      base.DEC),
 
-    payload = ProtoField.bytes("dtxmessage.payload", "payload")
+    payload = ProtoField.bytes("dtxmessage.payload", "payload"),
+    aux_magic = ProtoField.uint64("dtxmessage.aux_magic", "aux_magic", base.HEX),
+    aux_data_length = ProtoField.uint64("dtxmessage.aux_data_length",
+                                        "aux_data_length", base.DEC),
+    aux_data = ProtoField.bytes("dtxmessage.aux_data", "aux_data"),
+    aux_data_u32 = ProtoField.uint32("dtxmessage.aux_data_u32", "aux_data_u32",
+                                     base.DEC),
+    aux_data_u64 = ProtoField.uint64("dtxmessage.aux_data_u32", "aux_data_u32",
+                                     base.DEC),
+    aux_data_obj_len = ProtoField.uint32("dtxmessage.aux_data_obj_len",
+                                         "aux_data_obj_len", base.DEC),
+    aux_data_obj = ProtoField.bytes("dtxmessage.aux_data_obj", "aux_data_obj")
 }
 dtxmessage_protocol.fields = header_fields
 
@@ -97,6 +106,7 @@ function dtxmessage_protocol.dissector(tvbuf, pktinfo, root_tree)
 
     local bytes_consumed = 0
     while bytes_consumed < payload_length do
+        local aux_length = tvbuf(offset + 4, 4):le_uint()
         local total_length = tvbuf(offset + 8, 8):le_uint64():tonumber()
 
         local payload_tree = subtree:add(tvbuf(offset,
@@ -109,20 +119,80 @@ function dtxmessage_protocol.dissector(tvbuf, pktinfo, root_tree)
         offset = offset + 4
         payload_tree:add_le(header_fields.total_length, tvbuf(offset, 8))
         offset = offset + 8
-        payload_tree:add(header_fields.payload, tvbuf(offset, total_length))
-        offset = offset + total_length
+
+        -- local payload_offset = offset
+        -- AUXMessage
+        if aux_length > 0 then
+            payload_tree:add_le(header_fields.aux_magic, tvbuf(offset, 8))
+            offset = offset + 8
+            local aux_data_length = tvbuf(offset, 8):le_uint64():tonumber()
+            payload_tree:add_le(header_fields.aux_data_length, tvbuf(offset, 8))
+            offset = offset + 8
+
+            local _aux_data = {
+                [2] = function(offset, aux_tree)
+                    local obj_len = tvbuf(offset, 4):le_uint()
+                    local item_tree = aux_tree:add(tvbuf(offset - 8,
+                                                         8 + 4 + obj_len),
+                                                   "Aux Object")
+                    item_tree:add_le(header_fields.aux_data_obj_len,
+                                     tvbuf(offset, 4))
+                    offset = offset + 4
+                    -- item_tree:add(header_fields.aux_data_obj,
+                    --               tvbuf(offset, obj_len))
+                    print("plist_dissector,", tvbuf(offset, obj_len):tvb())
+                    plist_dissector(tvbuf(offset, obj_len):tvb(), pktinfo,
+                                    item_tree)
+                    return offset + obj_len
+                end,
+                [3] = function(offset, aux_tree)
+                    local item_tree = aux_tree:add(tvbuf(offset - 8, 8 + 4),
+                                                   "Aux UInt32")
+                    item_tree:add_le(header_fields.aux_data_u32,
+                                     tvbuf(offset, 4))
+                    return offset + 4
+                end,
+                [4] = function(offset, aux_tree)
+                    local item_tree = aux_tree:add(tvbuf(offset - 8, 8 + 8),
+                                                   "Aux UInt64")
+                    item_tree:add_le(header_fields.aux_data_u64,
+                                     tvbuf(offset, 8))
+                    return offset + 8
+                end
+            }
+            local aux_data_start = offset
+            local aux_tree = payload_tree:add(
+                                 tvbuf(aux_data_start, aux_data_length),
+                                 "Aux Data")
+
+            while offset < aux_data_start + aux_data_length do
+                local flag = tvbuf(offset, 4)
+                offset = offset + 4
+                local type = tvbuf(offset, 4):le_uint()
+                offset = offset + 4
+                offset = _aux_data[type](offset, aux_tree)
+            end
+            -- payload_tree:add(header_fields.aux_data,
+            --                  tvbuf(offset, aux_data_length))
+            -- offset = offset + aux_data_length
+        end
+        payload_tree:add(header_fields.payload,
+                         tvbuf(offset, total_length - aux_length))
+        -- plist_dissector(tvbuf(offset, total_length - aux_length):tvb(), pktinfo,
+        --                 payload_tree)
+
+        offset = offset + total_length - aux_length
 
         bytes_consumed = bytes_consumed + DTXMESSAGE_PAYLOAD_HDR_LEN +
                              total_length
     end
-
-    -- plist_dissector(tvbuf(offset, payload_length):tvb(), pktinfo, subtree)
 end
 
--- function dtxmessage_protocol.init()
---     local usbmux_subproto = DissectorTable.get("usbmux.subproto")
---     usbmux_subproto:add(0, dtxmessage_protocol)
--- end
+function dtxmessage_protocol.init()
+    plist_dissector = Dissector.get("plist")
+    -- local usbmux_subproto = DissectorTable.get("usbmux.subproto")
+    -- usbmux_subproto:add(0, dtxmessage_protocol)
+end
 
 -- local tcp_port = DissectorTable.get("tcp.port")
 -- tcp_port:add(0, dtxmessage_protocol)

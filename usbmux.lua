@@ -26,11 +26,6 @@ end
 -- call it now
 resetDebugLevel()
 
-local tls_dissector = Dissector.get("tls")
-local plist_dissector = Dissector.get("plist")
-local lockdown_dissector = Dissector.get("lockdown")
-local dtxmessage_dissector = Dissector.get("dtxmessage")
-
 usbmux_protocol = Proto("usbmux", "Apple USBMUX Protocol")
 
 DissectorTable.new("usbmux.subproto")
@@ -70,7 +65,12 @@ local sub_dissectors = {}
 local tcp_steam = Field.new("tcp.stream")
 -- local usbmux_tls = Field.new("usbmux.tls")
 
-function usbmux_protocol.init() end
+function usbmux_protocol.init()
+    tls_dissector = Dissector.get("tls")
+    plist_dissector = Dissector.get("plist")
+    lockdown_dissector = Dissector.get("lockdown")
+    dtxmessage_dissector = Dissector.get("dtxmessage")
+end
 
 local USBMUX_MSG_HDR_LEN = 4
 local TLS_MSG_HDR_LEN = 5

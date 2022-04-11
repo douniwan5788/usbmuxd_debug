@@ -1,5 +1,3 @@
-local plist_dissector = Dissector.get("plist")
-
 lockdown_protocol = Proto("lockdown", "Apple USBMUX lockdown service Protocol")
 local LOCKDOWN_MSG_HDR_LEN = 4
 
@@ -60,10 +58,12 @@ function lockdown_protocol.dissector(tvbuf, pktinfo, root_tree)
     plist_dissector(tvbuf(offset, payload_length):tvb(), pktinfo, subtree)
 end
 
--- function lockdown_protocol.init()
---     local usbmux_subproto = DissectorTable.get("usbmux.subproto")
---     usbmux_subproto:add(0, lockdown_protocol)
--- end
+function lockdown_protocol.init()
+    plist_dissector = Dissector.get("plist")
+
+    --     local usbmux_subproto = DissectorTable.get("usbmux.subproto")
+    --     usbmux_subproto:add(0, lockdown_protocol)
+end
 
 -- local tcp_port = DissectorTable.get("tcp.port")
 -- tcp_port:add(0, lockdown_protocol)
